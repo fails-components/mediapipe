@@ -395,7 +395,9 @@ class _BertClassifier(TextClassifier):
     ) + [
         tf.keras.callbacks.ModelCheckpoint(
             os.path.join(self._hparams.export_dir, "best_model"),
-            monitor="val_auc",
+            monitor="val_auc"
+            if self._num_classes == 2
+            else "val_accuracy",  # auc is a binary only metric
             mode="max",
             save_best_only=True,
             save_weights_only=False,
@@ -432,6 +434,13 @@ class _BertClassifier(TextClassifier):
         hparams=options.hparams,
         label_names=train_data.label_names,
     )
+    tf.io.gfile.makedirs(bert_classifier._hparams.export_dir)
+    config_file = os.path.join(
+        bert_classifier._hparams.export_dir, "config.txt"
+    )
+    with tf.io.gfile.GFile(config_file, "w") as f:
+      f.write(str(options))
+      f.write(f"\nlabel_names:{train_data.label_names}")
     bert_classifier._create_and_train_model(train_data, validation_data)
     return bert_classifier
 
@@ -533,11 +542,13 @@ class _BertClassifier(TextClassifier):
         tf.keras.metrics.SparseCategoricalAccuracy(
             "accuracy", dtype=tf.float32
         ),
-        metrics.SparsePrecision(name="precision", dtype=tf.float32),
-        metrics.SparseRecall(name="recall", dtype=tf.float32),
-        metrics.BinaryAUC(name="auc", num_thresholds=1000),
     ]
     if self._num_classes == 2:
+      metric_functions.extend([
+          metrics.BinaryAUC(name="auc", num_thresholds=1000),
+          metrics.SparsePrecision(name="precision", dtype=tf.float32),
+          metrics.SparseRecall(name="recall", dtype=tf.float32),
+      ])
       if self._hparams.desired_precisions:
         for desired_precision in self._hparams.desired_precisions:
           metric_functions.append(

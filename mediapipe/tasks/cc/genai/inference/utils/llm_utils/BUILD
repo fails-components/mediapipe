@@ -54,14 +54,16 @@ cc_library(
 
 cc_library(
     name = "metadata_utils",
+    srcs = ["metadata_utils.cc"],
     hdrs = ["metadata_utils.h"],
     deps = [
-        ":memory_mapped_file",
         "//mediapipe/tasks/cc/genai/inference/proto:llm_params_cc_proto",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
         "@org_tensorflow//tensorflow/lite:framework_stable",
+        "@org_tensorflow//tensorflow/lite/schema:schema_fbs",
     ],
 )
 
@@ -73,6 +75,8 @@ cc_library(
         ":memory_mapped_file",
         ":metadata_utils",
         ":scoped_file",
+        "//mediapipe/framework/deps:file_path",
+        "//mediapipe/framework/port:file_helpers",
         "//mediapipe/framework/port:ret_check",
         "//mediapipe/framework/port:status",
         "//mediapipe/tasks/cc/genai/inference/proto:llm_file_metadata_cc_proto",
@@ -86,5 +90,25 @@ cc_library(
         "@flatbuffers//:runtime_cc",
         "@org_tensorflow//tensorflow/lite:framework",
         "@org_tensorflow//tensorflow/lite/schema:schema_fbs",
+    ],
+)
+
+cc_library(
+    name = "well_known_models",
+    srcs = ["well_known_models.cc"],
+    hdrs = ["well_known_models.h"],
+    deps = [
+        "//mediapipe/tasks/cc/genai/inference/proto:llm_params_cc_proto",
+        "//mediapipe/tasks/cc/genai/inference/proto:transformer_params_cc_proto",
+    ],
+)
+
+cc_library(
+    name = "tokenizer_utils",
+    srcs = ["tokenizer_utils.cc"],
+    hdrs = ["tokenizer_utils.h"],
+    deps = [
+        "@com_google_absl//absl/strings",
+        "@com_google_sentencepiece//:sentencepiece_model_cc_proto",
     ],
 )

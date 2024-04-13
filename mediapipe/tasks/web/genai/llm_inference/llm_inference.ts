@@ -21,7 +21,7 @@ import {CachedGraphRunner, TaskRunner,} from '../../../../tasks/web/core/task_ru
 import {WasmFileset} from '../../../../tasks/web/core/wasm_fileset';
 import {LlmInferenceGraphOptions} from '../../../../tasks/web/genai/llm_inference/proto/llm_inference_graph_options_pb';
 import {WasmModule} from '../../../../web/graph_runner/graph_runner';
-import {SupportStreamingReader, StreamingReader} from '../../../../web/graph_runner/graph_runner_streaming_reader';
+import {StreamingReader, SupportStreamingReader} from '../../../../web/graph_runner/graph_runner_streaming_reader';
 import {SupportWebGpu} from '../../../../web/graph_runner/graph_runner_webgpu';
 import {DetokenizerCalculatorOptions} from '../../../../tasks/cc/genai/inference/calculators/detokenizer_calculator_pb';
 import {LlmGpuCalculatorOptions} from '../../../../tasks/cc/genai/inference/calculators/llm_gpu_calculator_pb';
@@ -61,8 +61,9 @@ const TOKEN_COST_OUTPUT_STREAM = 'token_cost_out';
 
 const DEFAULT_MAX_TOKENS = 512;
 const DEFAULT_TOP_K = 1;
+const DEFAULT_TOP_P = 1.0;
 const DEFAULT_TEMPERATURE = 1.0;
-const DEFAULT_SAMPLER_TYPE = SamplerParameters.Type.TOP_K;
+const DEFAULT_SAMPLER_TYPE = SamplerParameters.Type.TOP_P;
 
 /**
  * Performs LLM Inference on text.
@@ -73,7 +74,7 @@ export class LlmInference extends TaskRunner {
   private static readonly NEW_LINE = '<0x0A>';
   private static readonly EOD = '\\[eod\\]';
   private static readonly LLM_MODEL_NAME = 'llm.tflite';
-  private static readonly TOKENIZER_MODE_IN_TFLITE_KEY = 'spm_vocab_model';
+  private static readonly TOKENIZER_MODEL_IN_TFLITE_KEY = 'spm_vocab_model';
 
   private readonly generationResult: string[] = [];
   private readonly options: LlmInferenceGraphOptions;
@@ -195,6 +196,11 @@ export class LlmInference extends TaskRunner {
   override setOptions(options: LlmInferenceOptions): Promise<void> {
     // TODO: b/324482487 - Support customizing config for Web task of LLM
     // Inference.
+    if (this.isProcessing) {
+      throw new Error('Cannot set options while loading or processing.');
+    }
+    this.isProcessing = true;
+
     if (options.baseOptions?.gpuOptions?.device) {
       (this.graphRunner as unknown as StreamingReaderWebGpuGraphRunner)
           .initializeForWebGpu(options.baseOptions.gpuOptions.device);
@@ -221,6 +227,10 @@ export class LlmInference extends TaskRunner {
       this.samplerParams.setSeed(options.randomSeed);
     }
 
+    let onFinishedLoadingData!: () => void;
+    const finishedLoadingDataPromise = new Promise<void>((resolve, reject) => {
+      onFinishedLoadingData = resolve;
+    });
     if (options.baseOptions?.modelAssetPath ||
         options.baseOptions?.modelAssetBuffer) {
       if (options.baseOptions.modelAssetPath &&
@@ -230,18 +240,35 @@ export class LlmInference extends TaskRunner {
       }
       if (options.baseOptions.modelAssetPath) {
         this.streamingReader = StreamingReader.loadFromUrl(
-            options.baseOptions.modelAssetPath);
+            options.baseOptions.modelAssetPath, onFinishedLoadingData);
       } else if (options.baseOptions.modelAssetBuffer) {
         this.streamingReader = StreamingReader.loadFromArray(
-            options.baseOptions.modelAssetBuffer);
+            options.baseOptions.modelAssetBuffer, onFinishedLoadingData);
         // Remove the reference on the asset buffer since it is now owned by
         // `streamingReader`.
         options.baseOptions.modelAssetBuffer = undefined;
+      } else {
+        onFinishedLoadingData();
       }
     }
-    this.refreshGraph();
-    this.onGraphRefreshed();
-    return Promise.resolve();
+    // To allow graph closure across ASYNCIFY, where we cannot get a callback,
+    // we instead invoke it with a special mechanism and then wrap it into a
+    // promise. We then chain the graph-refresh promise with our data-loading
+    // promise so that a user can simply await the whole thing, and we block
+    // isProcessing for the entire duration.
+    const refreshGraphPromise = this.refreshGraph().then(() => {
+      this.onGraphRefreshed();
+    });
+    // Note: this is triggered from within the final loading call, so the wasm
+    // code hasn't quite finished running by this point in time. However, that
+    // microtask seems to complete before any code await-ing this function, so
+    // this should be fine. This seems to be similarly true for our
+    // resolveGeneration usage as well.
+    return finishedLoadingDataPromise.then(() => {
+      refreshGraphPromise.then(() => {
+        this.isProcessing = false;
+      });
+    });
   }
 
   protected override get baseOptions(): BaseOptionsProto {
@@ -279,7 +306,7 @@ export class LlmInference extends TaskRunner {
   generateResponse(text: string, progressListener?: ProgressListener):
       Promise<string> {
     if (this.isProcessing) {
-      throw new Error('Previous invocation is still processing.');
+      throw new Error('Previous invocation or loading is still ongoing.');
     }
     if (progressListener) {
       this.userProgressListener = progressListener;
@@ -304,16 +331,16 @@ export class LlmInference extends TaskRunner {
    * @return The number of tokens in the resulting tokenization of the text.
    *         May return undefined if an error occurred.
    */
-  sizeInTokens(text: string): number | undefined {
+  sizeInTokens(text: string): number|undefined {
     if (this.isProcessing) {
-      throw new Error('Previous invocation is still processing.');
+      throw new Error('Previous invocation or loading is still ongoing.');
     }
     this.isProcessing = true;
     this.latestTokenCostQueryResult = undefined;
     this.graphRunner.addStringToStream(
-      text,
-      TOKEN_COST_INPUT_STREAM,
-      this.getSynctheticTimestamp(),
+        text,
+        TOKEN_COST_INPUT_STREAM,
+        this.getSynctheticTimestamp(),
     );
     this.finishProcessing();
     this.isProcessing = false;
@@ -349,6 +376,7 @@ export class LlmInference extends TaskRunner {
     this.options.setMaxTokens(DEFAULT_MAX_TOKENS);
     this.samplerParams.setType(DEFAULT_SAMPLER_TYPE);
     this.samplerParams.setK(DEFAULT_TOP_K);
+    this.samplerParams.setP(DEFAULT_TOP_P);
     this.samplerParams.setTemperature(DEFAULT_TEMPERATURE);
   }
 
@@ -356,7 +384,7 @@ export class LlmInference extends TaskRunner {
   // available
 
   /** Updates the MediaPipe graph configuration. */
-  protected override refreshGraph(): void {
+  protected override refreshGraph(): Promise<void> {
     const graphConfig = this.buildLlmInferenceGraph();
 
     this.graphRunner.attachStringVectorListener(
@@ -391,11 +419,11 @@ export class LlmInference extends TaskRunner {
       this.setLatestOutputTimestamp(timestamp);
     });
 
-    this.graphRunner.attachIntListener(TOKEN_COST_OUTPUT_STREAM,
-        (cost, timestamp) => {
-      this.latestTokenCostQueryResult = cost;
-      this.setLatestOutputTimestamp(timestamp);
-    });
+    this.graphRunner.attachIntListener(
+        TOKEN_COST_OUTPUT_STREAM, (cost, timestamp) => {
+          this.latestTokenCostQueryResult = cost;
+          this.setLatestOutputTimestamp(timestamp);
+        });
 
     if (this.streamingReader) {
       (this.graphRunner as unknown as StreamingReaderWebGpuGraphRunner)
@@ -406,10 +434,20 @@ export class LlmInference extends TaskRunner {
     }
 
     const binaryGraph = graphConfig.serializeBinary();
-    this.setGraph(new Uint8Array(binaryGraph), /* isBinary= */ true);
 
-    // Wait for initialization to finish and free the model file data.
-    this.finishProcessing();
+    // Due to ASYNCIFY usage, the normal closeGraph(), which is automatically
+    // called by setGraph when changing a running graph, is not guaranteed to
+    // have finished by the time the function returns. There is no easy way to
+    // pipe through a completion callback like with other ASYNCIFY'ed calls. So
+    // instead, we use a special async-only variant of closeGraph which we can
+    // chain into our promises to ensure proper ordering, calling that first so
+    // the built-in closeGraph becomes a no-op.
+    return (this.graphRunner as unknown as StreamingReaderWebGpuGraphRunner)
+        .closeGraphAsync().then(() => {
+      this.setGraph(new Uint8Array(binaryGraph), /* isBinary= */ true);
+      // Start initialization; this is async when StreamingReader is used.
+      this.finishProcessing();
+    });
   }
 
   private buildLlmInferenceGraph(): CalculatorGraphConfig {
@@ -434,12 +472,24 @@ export class LlmInference extends TaskRunner {
     modelDataNode.addOutputSidePacket(
         'MODEL_DATA:' +
         '__side_packet_1');
+    modelDataNode.addOutputSidePacket(
+        'MODEL_TYPE:' +
+        'model_type');
     modelDataNode.addInputSidePacket(
         'READ_DATA_FN:' +
         'streaming_reader');
     graphConfig.addNode(modelDataNode);
 
     // Tokenizer Node
+    const gpt2NormalizationNode = new CalculatorGraphConfig.Node();
+    gpt2NormalizationNode.setCalculator('Gpt2UnicodeMappingCalculator');
+    gpt2NormalizationNode.addInputSidePacket(
+        'MODEL_DATA:' +
+        'model_type');
+    gpt2NormalizationNode.addOutputSidePacket(
+        'BYTES_TO_UNICODE_MAPPING:' +
+        'tokenizer_mapping');
+
     const tokenizerOptionsProto = new Any();
     tokenizerOptionsProto.setTypeUrl(
         'type.googleapis.com/odml.infra.proto.TokenizerCalculatorOptions');
@@ -448,7 +498,7 @@ export class LlmInference extends TaskRunner {
 
     const modelFile = new TokenizerCalculatorOptions.TfLiteModelFile();
     modelFile.setSpmModelKeyInMetadata(
-        LlmInference.TOKENIZER_MODE_IN_TFLITE_KEY);
+        LlmInference.TOKENIZER_MODEL_IN_TFLITE_KEY);
     tokenizerOptions.setTfliteModelFile(modelFile);
 
     tokenizerOptions.setStartTokenId(2);
@@ -460,16 +510,16 @@ export class LlmInference extends TaskRunner {
         'MODEL_DATA:' +
         '__side_packet_1');
     tokenizerNode.addInputStream(
-        'PROMPT:' +
+        'PROMPT_AND_INPUT_OPTIONS:' +
         'prompt');
-    tokenizerNode.addOutputSidePacket(
-        'PROCESSOR:' +
-        '__input_side_1');
-    tokenizerNode.addOutputSidePacket(
+    tokenizerNode.addInputSidePacket(
         'BYTES_TO_UNICODE_MAPPING:' +
-        '__input_side_2');
+        'tokenizer_mapping');
+    tokenizerNode.addOutputSidePacket(
+        'PROCESSOR_GETTER:' +
+        '__input_side_1');
     tokenizerNode.addOutputStream(
-        'IDS:' +
+        'IDS_AND_INPUT_OPTIONS:' +
         '__stream_0');
     graphConfig.addNode(tokenizerNode);
 
@@ -546,18 +596,18 @@ export class LlmInference extends TaskRunner {
     detokenizerNode.setCalculator('DetokenizerCalculator');
     detokenizerNode.addNodeOptions(detokenizerOptionsProto);
     detokenizerNode.addInputStream(
-        'IDS:' +
+        'IDS_AND_INPUT_OPTIONS:' +
         '__stream_3');
     detokenizerNode.addInputSidePacket(
-        'PROCESSOR:' +
+        'PROCESSOR_GETTER:' +
         '__input_side_1');
     detokenizerNode.addInputSidePacket(
         'BYTES_TO_UNICODE_MAPPING:' +
-        '__input_side_2');
+        'tokenizer_mapping');
     detokenizerNode.addInputSidePacket(
         'MODEL_DATA:' +
         '__side_packet_1');
-    detokenizerNode.addOutputStream('FINISH:finish');
+    detokenizerNode.addOutputStream('FINISH_AND_INPUT_OPTIONS:finish');
     detokenizerNode.addOutputStream('WORDS:' + OUTPUT_STREAM);
     graphConfig.addNode(detokenizerNode);
 
@@ -565,7 +615,7 @@ export class LlmInference extends TaskRunner {
     const tokenCostNode = new CalculatorGraphConfig.Node();
     tokenCostNode.setCalculator('TokenCostCalculator');
     tokenCostNode.addInputStream('PROMPT:' + TOKEN_COST_INPUT_STREAM);
-    tokenCostNode.addInputSidePacket('PROCESSOR:__input_side_1');
+    tokenCostNode.addInputSidePacket('PROCESSOR_GETTER:__input_side_1');
     tokenCostNode.addInputSidePacket('BYTES_TO_UNICODE_MAPPING:__input_side_2');
     tokenCostNode.addOutputStream('NUM_TOKENS:' + TOKEN_COST_OUTPUT_STREAM);
     graphConfig.addNode(tokenCostNode);

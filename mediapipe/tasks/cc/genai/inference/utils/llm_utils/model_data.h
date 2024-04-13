@@ -15,8 +15,8 @@
 #ifndef MEDIAPIPE_TASKS_GENAI_INFERENCE_UTILS_LLM_UTILS_MODEL_DATA_H_
 #define MEDIAPIPE_TASKS_GENAI_INFERENCE_UTILS_LLM_UTILS_MODEL_DATA_H_
 
-#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -32,6 +32,13 @@
 #include "tensorflow/lite/model_builder.h"
 
 namespace mediapipe::tasks::genai::llm_utils {
+
+// Expected file names for the custom format with metadata pointing to offsets
+// in the model file.
+constexpr absl::string_view kBaseWeightsFileName = "weights.bin";
+constexpr absl::string_view kLoraWeightsFileName = "lora_weights.bin";
+constexpr absl::string_view kBasePbFileName = "model.pb";
+constexpr absl::string_view kLoraPbFileName = "lora_model.pb";
 
 // Provides access to data tied to an underlying resource. The resource may be
 // released when this object is destroyed and spans previously returned from
@@ -49,8 +56,8 @@ class DataHolder {
 };
 
 struct OffsetAndSize {
-  uint64_t offset;
-  uint64_t size;
+  uint64_t offset = 0;
+  uint64_t size = 0;
 };
 // Gets an offset and size which will be valid to pass to MemoryMappedFile.
 OffsetAndSize GetAlignedOffsetAndSize(uint64_t base_offset, uint64_t base_size);
@@ -108,7 +115,7 @@ class ModelData {
       std::unique_ptr<DataHolder<const uint8_t>> llm_model_proto,
       ScopedFile file);
 
-  // Loads from a single tflite flatbuffer. Thie allocation should contain the
+  // Loads from a single tflite flatbuffer. The allocation should contain the
   // whole model including buffers.
   static absl::StatusOr<std::shared_ptr<ModelData>> Create(
       std::shared_ptr<tflite::FlatBufferModel> model);
@@ -116,6 +123,17 @@ class ModelData {
   // Loads a tflite model from a file. This is more efficient than the above
   // method since the data can be read into memory as needed.
   static absl::StatusOr<std::shared_ptr<ModelData>> Create(ScopedFile file);
+
+  // Loads `ModelData` from the provided `weight_path`, which contains either
+  // a tflite file or the weights and metadata files for the combined GPU model
+  // format, and the sentencepiece model at `spm_path`.
+  static absl::StatusOr<std::shared_ptr<ModelData>> Create(
+      absl::string_view weight_path, absl::string_view spm_path);
+
+  // Loads `ModelData` for LoRA weights located at `lora_path`. This loader
+  // expects either the combined GPU model format or a single tflite file.
+  static absl::StatusOr<std::shared_ptr<ModelData>> CreateLoRAFromPath(
+      absl::string_view lora_path);
 
   enum ReadMode {
     KEEP = 0,
