@@ -96,7 +96,7 @@ class Llm : protected xnn_utils::XnnGraph {
   virtual absl::Status GetNextToken(std::vector<int>* output_ids);
 
   // The size of all tokens, including prompt and generated tokens.
-  size_t TotalTokenSize() const;
+  virtual size_t TotalTokenSize() const;
 
   const LlmParams& GetLlmParams() { return llm_params_; }
 
@@ -104,6 +104,8 @@ class Llm : protected xnn_utils::XnnGraph {
   friend class PrefixDecodeLlm;
   friend class LlmTest;
   friend class LlmBuilder;
+
+  Llm() : XnnGraph(XnnSubgraphPtr{nullptr, nullptr}, nullptr) {}
 
   // Internal parameters to control prefix model.
   struct InternalLlmParams {

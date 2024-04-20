@@ -1,5 +1,6 @@
 #include <android/hardware_buffer.h>
 
+#include <array>
 #include <memory>
 
 #include "mediapipe/framework/formats/hardware_buffer.h"
@@ -12,6 +13,7 @@
 namespace mediapipe {
 namespace {
 
+using ::testing::Each;
 using ::testing::Return;
 using ::testing::Truly;
 
@@ -34,6 +36,56 @@ TEST(TensorAhwbTest, TestCpuThenAHWB) {
   }
 }
 
+TEST(TensorAhwbTest, EveryAhwbReadViewReleaseCallbackIsInvoked) {
+  constexpr int kNumReleaseCallbacks = 10;
+  std::array<bool, kNumReleaseCallbacks> callbacks_invoked;
+  callbacks_invoked.fill(false);
+
+  {
+    // Create tensor.
+    Tensor tensor(Tensor::ElementType::kFloat32, Tensor::Shape{1});
+    {
+      auto ptr = tensor.GetCpuWriteView().buffer<float>();
+      EXPECT_NE(ptr, nullptr);
+    }
+
+    // Get AHWB read view multiple times (e.g. simulating how multiple inference
+    // calculators could read from the same tensor)
+    for (int i = 0; i < kNumReleaseCallbacks; ++i) {
+      auto view = tensor.GetAHardwareBufferReadView();
+      EXPECT_NE(view.handle(), nullptr);
+      view.SetReleaseCallback(
+          [&callbacks_invoked, i] { callbacks_invoked[i] = true; });
+    }
+
+    // Destroy tensor on scope exit triggering release callbacks.
+  }
+
+  EXPECT_THAT(callbacks_invoked, Each(true));
+}
+
+TEST(TensorAhwbTest, EveryAhwbWriteViewReleaseCallbackIsInvoked) {
+  constexpr int kNumReleaseCallbacks = 10;
+  std::array<bool, kNumReleaseCallbacks> callbacks_invoked;
+  callbacks_invoked.fill(false);
+
+  {
+    // Create tensor.
+    Tensor tensor(Tensor::ElementType::kFloat32, Tensor::Shape{1});
+    // Get AHWB write view multiple times and set release callback.
+    for (int i = 0; i < kNumReleaseCallbacks; ++i) {
+      auto view = tensor.GetAHardwareBufferWriteView();
+      EXPECT_NE(view.handle(), nullptr);
+      view.SetReleaseCallback(
+          [&callbacks_invoked, i] { callbacks_invoked[i] = true; });
+    }
+
+    // Destroy tensor on scope exit triggering release callbacks.
+  }
+
+  EXPECT_THAT(callbacks_invoked, Each(true));
+}
+
 TEST(TensorAhwbTest, TestAHWBThenCpu) {
   Tensor tensor(Tensor::ElementType::kFloat32, Tensor::Shape{1});
   {
@@ -48,9 +100,10 @@ TEST(TensorAhwbTest, TestAHWBThenCpu) {
 }
 
 TEST(TensorAhwbTest, TestAhwbAlignment) {
-  Tensor tensor(Tensor::ElementType::kFloat32, Tensor::Shape{5});
+  Tensor tensor(Tensor::ElementType::kFloat32, Tensor::Shape{5},
+                /*memory_manager=*/nullptr, /*memory_alignment=*/16);
   {
-    auto view = tensor.GetAHardwareBufferWriteView(16);
+    auto view = tensor.GetAHardwareBufferWriteView();
     ASSERT_NE(view.handle(), nullptr);
     if (__builtin_available(android 26, *)) {
       AHardwareBuffer_Desc desc;
@@ -78,38 +131,28 @@ TEST(TensorAhwbTest, TestTrackingAhwb) {
   // Create first tensor and request Cpu and then Ahwb view to mark the source
   // location for Ahwb storage.
   {
-    Tensor tensor(Tensor::ElementType::kFloat32, Tensor::Shape{9});
+    Tensor tensor(Tensor::ElementType::kFloat32, Tensor::Shape{9},
+                  /*memory_manager=*/nullptr, /*memory_alignment=*/16);
     {
       auto view = GetCpuView(tensor);
       EXPECT_NE(view.buffer<float>(), nullptr);
     }
     {
       // Align size of the Ahwb by multiple of 16.
-      auto view = tensor.GetAHardwareBufferWriteView(16);
+      auto view = tensor.GetAHardwareBufferWriteView();
       EXPECT_NE(view.handle(), nullptr);
       view.SetReadingFinishedFunc([](bool) { return true; });
     }
   }
   {
-    Tensor tensor(Tensor::ElementType::kFloat32, Tensor::Shape{9});
+    Tensor tensor(Tensor::ElementType::kFloat32, Tensor::Shape{9},
+                  /*memory_manager=*/nullptr, /*memory_alignment=*/16);
     {
       // The second tensor uses the same Cpu view source location so Ahwb
       // storage is allocated internally.
       auto view = GetCpuView(tensor);
       EXPECT_NE(view.buffer<float>(), nullptr);
-    }
-    {
-      // Check the Ahwb size to be aligned to multiple of 16. The alignment is
-      // stored by previous requesting of the Ahwb view.
-      auto view = tensor.GetAHardwareBufferReadView();
-      EXPECT_NE(view.handle(), nullptr);
-      if (__builtin_available(android 26, *)) {
-        AHardwareBuffer_Desc desc;
-        AHardwareBuffer_describe(view.handle(), &desc);
-        // sizeof(float) * 9 = 36. The closest aligned size is 48.
-        EXPECT_EQ(desc.width, 48);
-      }
-      view.SetReadingFinishedFunc([](bool) { return true; });
+      EXPECT_TRUE(tensor.ready_as_ahwb());
     }
   }
 }
