@@ -35,7 +35,7 @@ typedef void LlmInferenceEngine_Session;
 
 // LlmSessionConfig configures how to execute the model.
 typedef struct {
-  // Path to the tflite flatbuffer file.
+  // Path to the model artifact.
   const char* model_path;
 
   // Directory path for storing model related tokenizer and cache weights. the
@@ -93,8 +93,9 @@ ODML_EXPORT void LlmInferenceEngine_CloseResponseContext(
     LlmResponseContext* response_context);
 
 // Create a LlmInferenceEngine session for executing a query.
-ODML_EXPORT LlmInferenceEngine_Session* LlmInferenceEngine_CreateSession(
-    const LlmSessionConfig* session_config);
+ODML_EXPORT int LlmInferenceEngine_CreateSession(
+    const LlmSessionConfig* session_config,
+    LlmInferenceEngine_Session** session_out, char** error_msg);
 
 // Free the session, will wait until graph is done executing.
 ODML_EXPORT void LlmInferenceEngine_Session_Delete(

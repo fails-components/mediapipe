@@ -49,6 +49,9 @@ LlmSessionConfig ParseSessionConfig(void* bytes, int size) {
   output.temperature = input.temperature();
   output.topk = input.topk();
   output.random_seed = input.random_seed();
+  if (input.has_lora_path()) {
+    output.lora_path = strdup(input.lora_path().c_str());
+  }
   return output;
 }
 
@@ -108,7 +111,15 @@ JNIEXPORT jlong JNICALL JNI_METHOD(nativeCreateSession)(
   env->ReleaseByteArrayElements(session_config_bytes, session_config_ref,
                                 JNI_ABORT);
 
-  void* session = LlmInferenceEngine_CreateSession(&session_config);
+  void* session = nullptr;
+  char* error_msg = nullptr;
+  int error_code =
+      LlmInferenceEngine_CreateSession(&session_config, &session, &error_msg);
+  if (error_code) {
+    ThrowIfError(env, absl::InternalError(absl::StrCat(
+                          "Failed to initialize session: %s", error_msg)));
+    free(error_msg);
+  }
   FreeSessionConfig(&session_config);
   return reinterpret_cast<jlong>(session);
 }
